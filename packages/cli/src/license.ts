@@ -252,6 +252,17 @@ export class License implements LicenseProvider {
 	}
 
 	isLicensed(feature: BooleanLicenseFeature) {
+		if (this.globalConfig.license.unlockAll) {
+			// Licensed = API disabled; keep public API available when unlocking all features.
+			if (
+				feature === LICENSE_FEATURES.API_DISABLED ||
+				feature === LICENSE_FEATURES.SHOW_NON_PROD_BANNER
+			) {
+				return false;
+			}
+			return true;
+		}
+
 		return this.manager?.hasFeatureEnabled(feature) ?? false;
 	}
 
@@ -383,6 +394,14 @@ export class License implements LicenseProvider {
 	}
 
 	getValue<T extends keyof FeatureReturnType>(feature: T): FeatureReturnType[T] {
+		if (
+			this.globalConfig.license.unlockAll &&
+			typeof feature === 'string' &&
+			feature.startsWith('quota:')
+		) {
+			return UNLIMITED_LICENSE_QUOTA as FeatureReturnType[T];
+		}
+
 		return this.manager?.getFeatureValue(feature) as FeatureReturnType[T];
 	}
 

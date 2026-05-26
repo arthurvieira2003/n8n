@@ -10,6 +10,11 @@
 
 import { $, echo, fs, chalk } from 'zx';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+import { configureZxShellForWindows } from './zx-win32-shell.mjs';
+
+configureZxShellForWindows();
 
 // Check if running in a CI environment
 const isCI = process.env.CI === 'true';
@@ -22,7 +27,7 @@ const excludeTestController =
 $.verbose = !isCI;
 process.env.FORCE_COLOR = isCI ? '0' : '1';
 
-const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const isInScriptsDir = path.basename(scriptDir) === 'scripts';
 const rootDir = isInScriptsDir ? path.join(scriptDir, '..') : scriptDir;
 
@@ -33,6 +38,27 @@ const config = {
 	cliDir: path.join(rootDir, 'packages', 'cli'),
 	rootDir: rootDir,
 };
+
+// When running the production build on Windows via Git Bash, make sure all
+// paths passed to `bash` are converted to Git Bash format (`C:\...` -> `/c/...`).
+// Otherwise zx templates like `cd $'C:\\Users\\...': no such file`.
+function toGitBashPath(inputPath) {
+	if (process.platform !== 'win32') return inputPath;
+
+	const match = inputPath.match(/^([A-Za-z]):[\\/](.*)$/);
+	if (match) {
+		const drive = match[1].toLowerCase();
+		const rest = match[2].replace(/\\/g, '/');
+		return `/${drive}/${rest}`;
+	}
+
+	// Fallback: best-effort normalization.
+	return inputPath.replace(/\\/g, '/');
+}
+
+const gitRootDir = toGitBashPath(config.rootDir);
+const gitCompiledAppDir = toGitBashPath(config.compiledAppDir);
+const gitCompiledTaskRunnerDir = toGitBashPath(config.compiledTaskRunnerDir);
 
 // Define backend patches to keep during deployment
 const PATCHES_TO_KEEP = ['pdfjs-dist', 'pkce-challenge', 'bull'];
@@ -62,6 +88,47 @@ function formatDuration(seconds) {
 	return `${secs}s`;
 }
 
+/**
+ * pnpm deploy on Windows creates junctions under node_modules. Docker COPY does not
+ * resolve them, so modules like semver are missing inside the Linux image.
+ */
+async function materializeNodeModulesForDocker(deployDir) {
+	if (process.platform !== 'win32') {
+		return;
+	}
+
+	const nodeModulesDir = path.join(deployDir, 'node_modules');
+	if (!(await fs.pathExists(nodeModulesDir))) {
+		return;
+	}
+
+	// pnpm deploy leaves a .pnpm store with junctions/symlinks that Docker COPY cannot use on Linux.
+	const pnpmStore = path.join(nodeModulesDir, '.pnpm');
+	if (!(await fs.pathExists(pnpmStore))) {
+		return;
+	}
+
+	echo(
+		chalk.yellow(
+			`INFO: Materializing node_modules in ${deployDir} (pnpm junctions break Docker COPY on Windows)...`,
+		),
+	);
+
+	const tempDir = path.join(deployDir, 'node_modules.__docker_materialized');
+	await fs.remove(tempDir);
+	await $`cp -rL ${toGitBashPath(nodeModulesDir)} ${toGitBashPath(tempDir)}`;
+	await fs.remove(nodeModulesDir);
+	await fs.move(tempDir, nodeModulesDir);
+
+	const semverSatisfies = path.join(nodeModulesDir, 'semver', 'functions', 'satisfies.js');
+	if (!(await fs.pathExists(semverSatisfies))) {
+		echo(chalk.red(`ERROR: Failed to materialize node_modules in ${deployDir}`));
+		process.exit(1);
+	}
+
+	echo(chalk.green(`✅ node_modules materialized in ${deployDir}`));
+}
+
 function printHeader(title) {
 	echo('');
 	echo(chalk.blue.bold(`===== ${title} =====`));
@@ -69,6 +136,28 @@ function printHeader(title) {
 
 function printDivider() {
 	echo(chalk.gray('-----------------------------------------------'));
+}
+
+/** `du` via Git Bash on large Windows folders (e.g. compiled/node_modules) can hang for hours. */
+async function getDirectorySizeHuman(dir) {
+	if (process.platform === 'win32') {
+		echo(chalk.gray(`INFO: Calculating size of ${dir} (Windows)...`));
+		const escaped = dir.replace(/'/g, "''");
+		const { stdout } =
+			await $`powershell -NoProfile -Command "(Get-ChildItem -LiteralPath '${escaped}' -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum"`;
+		const bytes = Number(stdout.trim());
+		if (!Number.isFinite(bytes) || bytes <= 0) return 'unknown';
+		const units = ['B', 'K', 'M', 'G'];
+		let size = bytes;
+		let unit = 0;
+		while (size >= 1024 && unit < units.length - 1) {
+			size /= 1024;
+			unit++;
+		}
+		return `${size.toFixed(1)}${units[unit]}`;
+	}
+
+	return (await $`du -sh ${toGitBashPath(dir)} | cut -f1`).stdout.trim();
 }
 
 // #endregion ===== Helper Functions =====
@@ -97,11 +186,11 @@ startTimer('package_build');
 
 echo(chalk.yellow('INFO: Running pnpm install and build...'));
 try {
-	const installProcess = $`cd ${config.rootDir} && pnpm install --frozen-lockfile`;
+	const installProcess = $`cd ${gitRootDir} && pnpm install --frozen-lockfile`;
 	installProcess.pipe(process.stdout);
 	await installProcess;
 
-	const buildProcess = $`cd ${config.rootDir} && pnpm build --summarize`;
+	const buildProcess = $`cd ${gitRootDir} && pnpm build --summarize`;
 	buildProcess.pipe(process.stdout);
 	await buildProcess;
 
@@ -110,7 +199,7 @@ try {
 	if (process.env.N8N_SKIP_LICENSES !== 'true') {
 		echo(chalk.yellow('INFO: Generating third-party licenses...'));
 		try {
-			const licenseProcess = $`cd ${config.rootDir} && node scripts/generate-third-party-licenses.mjs`;
+			const licenseProcess = $`cd ${gitRootDir} && node scripts/generate-third-party-licenses.mjs`;
 			licenseProcess.pipe(process.stdout);
 			await licenseProcess;
 			echo(chalk.green('✅ Third-party licenses generated successfully'));
@@ -137,7 +226,7 @@ printDivider();
 echo(chalk.yellow('INFO: Performing pre-deploy cleanup on package.json files...'));
 
 // Find and backup package.json files
-const packageJsonFiles = await $`cd ${config.rootDir} && find . -name "package.json" \
+const packageJsonFiles = await $`cd ${gitRootDir} && find . -name "package.json" \
 -not -path "./node_modules/*" \
 -not -path "*/node_modules/*" \
 -not -path "./compiled/*" \
@@ -154,7 +243,7 @@ if (process.env.CI !== 'true') {
 	}
 }
 // Run FE trim script
-await $`cd ${config.rootDir} && node .github/scripts/trim-fe-packageJson.js`;
+await $`cd ${gitRootDir} && node .github/scripts/trim-fe-packageJson.js`;
 echo(chalk.yellow('INFO: Performing selective patch cleanup...'));
 
 const packageJsonPath = path.join(config.rootDir, 'package.json');
@@ -207,7 +296,7 @@ if (excludeTestController) {
 	echo(chalk.gray('  - Excluded test controller from packages/cli/package.json'));
 }
 
-await $`cd ${config.rootDir} && NODE_ENV=production DOCKER_BUILD=true pnpm --filter=n8n --prod --legacy deploy --no-optional ./compiled`;
+await $`cd ${gitRootDir} && NODE_ENV=production DOCKER_BUILD=true pnpm --filter=n8n --prod --legacy deploy --no-optional ./compiled`;
 await fs.ensureDir(config.compiledTaskRunnerDir);
 
 echo(
@@ -216,7 +305,10 @@ echo(
 	),
 );
 
-await $`cd ${config.rootDir} && NODE_ENV=production DOCKER_BUILD=true pnpm --filter=@n8n/task-runner --prod --legacy deploy --no-optional ${config.compiledTaskRunnerDir}`;
+await $`cd ${gitRootDir} && NODE_ENV=production DOCKER_BUILD=true pnpm --filter=@n8n/task-runner --prod --legacy deploy --no-optional ${gitCompiledTaskRunnerDir}`;
+
+await materializeNodeModulesForDocker(config.compiledAppDir);
+await materializeNodeModulesForDocker(config.compiledTaskRunnerDir);
 
 const packageDeployTime = getElapsedTime('package_deploy');
 
@@ -235,10 +327,8 @@ if (process.env.CI !== 'true') {
 }
 
 // Calculate output size
-const compiledAppOutputSize = (await $`du -sh ${config.compiledAppDir} | cut -f1`).stdout.trim();
-const compiledTaskRunnerOutputSize = (
-	await $`du -sh ${config.compiledTaskRunnerDir} | cut -f1`
-).stdout.trim();
+const compiledAppOutputSize = await getDirectorySizeHuman(config.compiledAppDir);
+const compiledTaskRunnerOutputSize = await getDirectorySizeHuman(config.compiledTaskRunnerDir);
 
 // Generate build manifests
 const buildManifest = {

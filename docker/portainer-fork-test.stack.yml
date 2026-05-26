@@ -1,0 +1,47 @@
+# Stack para testar o fork em paralelo (porta 5679) usando os MESMOS dados do n8n na 5678.
+#
+# Volume: reutiliza o existente (ex.: n8n_n8n_data) — NÃO cria volume novo nem apaga dados.
+#   `external: true` + `name:` só ANEXA o volume já criado; o Docker não recria nem limpa o conteúdo.
+#
+# Banco: mesmas variáveis DB_POSTGRESDB_* do container na 5678 (mesmo Postgres, database n8n).
+#
+# Portas:
+#   Produção (antigo): host 5678 -> container 5678
+#   Teste (fork):      host 5679 -> container 5678
+#
+# === Portainer ===
+# Stacks > Add stack > cole este arquivo + variáveis de fork-test.env.example
+# Ao remover a stack depois: NÃO marque "Remove volumes".
+#
+# === Risco de dois n8n ao mesmo tempo (mesmo volume + mesmo Postgres) ===
+# - Migrações de schema podem rodar nos dois na subida.
+# - Webhooks/cron podem disparar em duplicata.
+# - Para teste mais seguro: pare o container da 5678, suba só o da 5679, valide e decida o corte.
+#   Se precisar dos dois ligados, mantenha o teste curto e evite editar workflows nos dois ao mesmo tempo.
+
+services:
+  n8n-fork-test:
+    image: ${N8N_FORK_IMAGE}
+    container_name: n8n-fork-test
+    restart: unless-stopped
+    ports:
+      - "${N8N_FORK_HOST_PORT:-5679}:5678"
+    environment:
+      N8N_LICENSE_UNLOCK_ALL: ${N8N_LICENSE_UNLOCK_ALL:-true}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-}
+      DB_TYPE: ${DB_TYPE:-postgresdb}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: ${DB_POSTGRESDB_SCHEMA:-public}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-}
+      TZ: ${TZ:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
+    external: true
+    name: ${N8N_DATA_VOLUME:-n8n_n8n_data}

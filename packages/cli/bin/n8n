@@ -36,8 +36,22 @@ require('reflect-metadata');
 // Skip loading dotenv in e2e tests.
 // Also, do not use `inE2ETests` from constants here, because that'd end up code that might read from `process.env` before the values are loaded from an `.env` file.
 if (process.env.E2E_TESTS !== 'true') {
-	// Loading dotenv early ensures that `process.env` is up-to-date everywhere in code
-	require('dotenv').config({ quiet: true });
+	// Loading dotenv early ensures that `process.env` is up-to-date everywhere in code.
+	// Load from monorepo root (for `pnpm dev` in packages/cli) and from cwd; later files win.
+	const fs = require('fs');
+	const dotenv = require('dotenv');
+	const repoRoot = path.join(__dirname, '../../..');
+	const envFiles = [
+		path.join(repoRoot, '.env'),
+		path.join(repoRoot, '.env.local'),
+		path.join(process.cwd(), '.env'),
+		path.join(process.cwd(), '.env.local'),
+	];
+	for (const envPath of envFiles) {
+		if (fs.existsSync(envPath)) {
+			dotenv.config({ path: envPath, quiet: true, override: true });
+		}
+	}
 }
 
 // Load config early to ensure `N8N_CONFIG_FILES` values are populated into `GlobalConfig`

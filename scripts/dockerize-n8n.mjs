@@ -11,6 +11,10 @@ import { $, echo, fs, chalk, os } from 'zx';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
+import { configureZxShellForWindows } from './zx-win32-shell.mjs';
+
+configureZxShellForWindows();
+
 // Disable verbose mode for cleaner output
 $.verbose = false;
 process.env.FORCE_COLOR = '1';
@@ -128,6 +132,14 @@ async function getContainerEngine() {
 	throw new Error('No supported container engine found. Please install Docker or Podman.');
 }
 
+/**
+ * Docker CLI on Windows breaks when paths contain `\n` (e.g. `...\GitHub\n8n`).
+ * Use resolved forward-slash paths for build context and dockerfile.
+ */
+function toDockerPath(inputPath) {
+	return path.resolve(inputPath).replace(/\\/g, '/');
+}
+
 // #endregion ===== Helper Functions =====
 
 const __filename = fileURLToPath(import.meta.url);
@@ -165,10 +177,12 @@ const config = {
 			return `${this.imageBaseName}:${this.imageTag}`;
 		},
 	},
-	buildContext: rootDir,
+	buildContext: toDockerPath(rootDir),
 	compiledAppDir: path.join(rootDir, 'compiled'),
 	compiledTaskRunnerDir: path.join(rootDir, 'dist', 'task-runner-javascript'),
 };
+
+const skipRunnersBuild = process.env.N8N_DOCKER_SKIP_RUNNERS === 'true';
 
 // #region ===== Main Build Process =====
 
@@ -177,7 +191,8 @@ const platform = getDockerPlatform();
 async function main() {
 	echo(chalk.blue.bold('===== Docker Build for n8n & Runners ====='));
 	echo(`INFO: n8n Image: ${config.n8n.fullImageName}`);
-	echo(`INFO: Runners Image: ${config.runners.fullImageName}`);
+	echo(`INFO: Runners Image: ${skipRunnersBuild ? '(skipped)' : config.runners.fullImageName}`);
+	echo(`INFO: Build context: ${config.buildContext}`);
 	echo(`INFO: Platform: ${platform}`);
 	if (noCache) echo(chalk.yellow('INFO: Docker layer cache disabled (DOCKER_BUILD_NO_CACHE=true)'));
 	if (withBaseImage) echo(chalk.yellow('INFO: Building base image first (DOCKER_BUILD_BASE_IMAGE=true)'));
@@ -203,16 +218,23 @@ async function main() {
 		buildArgs: nodeVersionArgs,
 	});
 
-	const runnersBuildTime = await buildDockerImage({
-		name: 'runners',
-		dockerfilePath: config.runners.dockerfilePath,
-		fullImageName: config.runners.fullImageName,
-		buildArgs: nodeVersionArgs,
-	});
+	let runnersBuildTime = '0s';
+	let runnersImageSize = 'skipped';
+
+	if (skipRunnersBuild) {
+		echo(chalk.gray('INFO: Skipping runners image (N8N_DOCKER_SKIP_RUNNERS=true)'));
+	} else {
+		runnersBuildTime = await buildDockerImage({
+			name: 'runners',
+			dockerfilePath: config.runners.dockerfilePath,
+			fullImageName: config.runners.fullImageName,
+			buildArgs: nodeVersionArgs,
+		});
+		runnersImageSize = await getImageSize(config.runners.fullImageName);
+	}
 
 	// Get image details
 	const n8nImageSize = await getImageSize(config.n8n.fullImageName);
-	const runnersImageSize = await getImageSize(config.runners.fullImageName);
 
 	const imageStats = [
 		{
@@ -221,12 +243,16 @@ async function main() {
 			size: n8nImageSize,
 			buildTime: n8nBuildTime,
 		},
-		{
-			imageName: config.runners.fullImageName,
-			platform,
-			size: runnersImageSize,
-			buildTime: runnersBuildTime,
-		},
+		...(skipRunnersBuild
+			? []
+			: [
+					{
+						imageName: config.runners.fullImageName,
+						platform,
+						size: runnersImageSize,
+						buildTime: runnersBuildTime,
+					},
+				]),
 	];
 
 	// Write docker build manifest for telemetry collection
@@ -270,6 +296,8 @@ async function checkPrerequisites() {
 async function buildDockerImage({ name, dockerfilePath, fullImageName, buildArgs = [] }) {
 	const startTime = Date.now();
 	const containerEngine = await getContainerEngine();
+	const dockerfile = toDockerPath(dockerfilePath);
+	const buildContext = config.buildContext;
 	// Push directly if image name contains a registry (e.g., ghcr.io/...)
 	// This avoids the slow --load step (export/import tarball) when pushing to a registry
 	const shouldPush = fullImageName.includes('/') && fullImageName.split('/').length > 2;
@@ -294,8 +322,8 @@ async function buildDockerImage({ name, dockerfilePath, fullImageName, buildArgs
 				--build-arg TARGETPLATFORM=${platform} \
 				${extraFlags} \
 				-t ${fullImageName} \
-				-f ${dockerfilePath} \
-				${config.buildContext}`;
+				-f ${dockerfile} \
+				${buildContext}`;
 			echo(stdout);
 		} else if (useLegacyDockerBuild) {
 			// Buildx 'docker' driver (colima default) doesn't support `--load` or
@@ -305,8 +333,8 @@ async function buildDockerImage({ name, dockerfilePath, fullImageName, buildArgs
 				--build-arg TARGETPLATFORM=${platform} \
 				${extraFlags} \
 				-t ${fullImageName} \
-				-f ${dockerfilePath} \
-				${config.buildContext}`;
+				-f ${dockerfile} \
+				${buildContext}`;
 			echo(stdout);
 		} else {
 			// Use docker buildx build to leverage Blacksmith's layer caching when running in CI.
@@ -319,10 +347,10 @@ async function buildDockerImage({ name, dockerfilePath, fullImageName, buildArgs
 				--build-arg TARGETPLATFORM=${platform} \
 				${extraFlags} \
 				-t ${fullImageName} \
-				-f ${dockerfilePath} \
+				-f ${dockerfile} \
 				--provenance=false \
 				${outputFlag} \
-				${config.buildContext}`;
+				${buildContext}`;
 			echo(stdout);
 		}
 

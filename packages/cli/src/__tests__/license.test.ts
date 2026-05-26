@@ -1,5 +1,6 @@
 import { mockLogger } from '@n8n/backend-test-utils';
 import type { GlobalConfig } from '@n8n/config';
+import { LICENSE_FEATURES, LICENSE_QUOTAS, UNLIMITED_LICENSE_QUOTA } from '@n8n/constants';
 import type { SettingsRepository } from '@n8n/db';
 import { LicenseManager } from '@n8n_io/license-sdk';
 import { mock } from 'jest-mock-extended';
@@ -28,6 +29,7 @@ const licenseConfig: GlobalConfig['license'] = {
 	activationKey: MOCK_ACTIVATION_KEY,
 	tenantId: 1,
 	cert: '',
+	unlockAll: false,
 };
 
 describe('License', () => {
@@ -664,6 +666,33 @@ describe('License', () => {
 
 			expect(expiringDays).toBe(3); // ceiling of 2.3
 			expect(terminatingDays).toBe(6); // ceiling of 5.7
+		});
+	});
+
+	describe('unlockAll', () => {
+		let unlockAllLicense: License;
+
+		beforeEach(async () => {
+			const globalConfig = mock<GlobalConfig>({
+				license: { ...licenseConfig, unlockAll: true },
+				multiMainSetup: { enabled: false },
+			});
+			unlockAllLicense = new License(mockLogger(), instanceSettings, mock(), mock(), globalConfig);
+			await unlockAllLicense.init();
+		});
+
+		it('should enable enterprise features without a license certificate', () => {
+			expect(unlockAllLicense.isLicensed(LICENSE_FEATURES.ADVANCED_PERMISSIONS)).toBe(true);
+			expect(unlockAllLicense.isLicensed(LICENSE_FEATURES.SHARING)).toBe(true);
+		});
+
+		it('should not enable API-disabled or non-prod banner features', () => {
+			expect(unlockAllLicense.isLicensed(LICENSE_FEATURES.API_DISABLED)).toBe(false);
+			expect(unlockAllLicense.isLicensed(LICENSE_FEATURES.SHOW_NON_PROD_BANNER)).toBe(false);
+		});
+
+		it('should return unlimited quotas', () => {
+			expect(unlockAllLicense.getValue(LICENSE_QUOTAS.USERS_LIMIT)).toBe(UNLIMITED_LICENSE_QUOTA);
 		});
 	});
 });

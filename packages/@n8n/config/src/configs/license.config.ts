@@ -25,4 +25,11 @@ export class LicenseConfig {
 	/** Ephemeral license certificate. See: https://github.com/n8n-io/license-management?tab=readme-ov-file#concept-ephemeral-entitlements */
 	@Env('N8N_LICENSE_CERT')
 	cert: string = '';
+
+	/**
+	 * When true, treats all boolean license features as enabled and numeric quotas as
+	 * unlimited. Intended for self-hosted forks without an Enterprise license.
+	 */
+	@Env('N8N_LICENSE_UNLOCK_ALL')
+	unlockAll: boolean = false;
 }
