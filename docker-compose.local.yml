@@ -1,0 +1,26 @@
+services:
+  n8n-local:
+    image: copapel/n8n:2.25.1
+    container_name: n8n-local
+    restart: 'no'
+    ports:
+      - '5678:5678'
+    environment:
+      - N8N_PROTOCOL=http
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - TZ=America/Sao_Paulo
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=189.126.105.186
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=admin
+      - DB_POSTGRESDB_PASSWORD=guerreirosdacatolica
+
+    volumes:
+      - type: bind
+        source: C:/Users/Arthur Vieira/Desktop/n8n_n8n_data/_data
+        target: /home/node/.n8n
