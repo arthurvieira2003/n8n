@@ -57,6 +57,9 @@ const chromeMock = {
 			}),
 		},
 	},
+	windows: {
+		getCurrent: vi.fn(),
+	},
 };
 
 Object.assign(globalThis, { chrome: chromeMock });
@@ -137,6 +140,7 @@ beforeEach(() => {
 	});
 
 	chromeMock.tabs.get.mockImplementation(async (id: number) => await Promise.resolve(makeTab(id)));
+	chromeMock.windows.getCurrent.mockResolvedValue({ type: 'normal' } as chrome.windows.Window);
 });
 
 // ---------------------------------------------------------------------------
@@ -413,6 +417,42 @@ describe('useConnection', () => {
 			wrapper.unmount();
 		});
 
+		// Runs a successful connect and reports whether the page closed itself.
+		async function connectAndCheckWindowClosed(windowType: string): Promise<boolean> {
+			chromeMock.windows.getCurrent.mockResolvedValue({
+				type: windowType,
+			} as chrome.windows.Window);
+			chromeMock.runtime.sendMessage.mockImplementation(async (msg: { type: string }) => {
+				if (msg.type === 'getSettings') return { allowTabCreation: true, allowTabClosing: false };
+				if (msg.type === 'getRelayUrl') return 'ws://localhost:1234';
+				if (msg.type === 'getStatus') return { connected: false, tabIds: [] };
+				if (msg.type === 'getTabs') return [makeTab(1)];
+				if (msg.type === 'connect') return { success: true };
+				if (msg.type === 'clearRelayUrl') return { success: true };
+				return await Promise.resolve({});
+			});
+			const closeSpy = vi.spyOn(window, 'close').mockImplementation(() => {});
+
+			const { wrapper, result } = mountComposable();
+			await flush();
+
+			await result().connect();
+			await flush();
+
+			const closed = closeSpy.mock.calls.length > 0;
+			closeSpy.mockRestore();
+			wrapper.unmount();
+			return closed;
+		}
+
+		it('closes the window after connecting when opened as a popup', async () => {
+			expect(await connectAndCheckWindowClosed('popup')).toBe(true);
+		});
+
+		it('keeps the window open after connecting in a regular tab', async () => {
+			expect(await connectAndCheckWindowClosed('normal')).toBe(false);
+		});
+
 		it('does nothing when no relay URL is available', async () => {
 			chromeMock.runtime.sendMessage.mockImplementation(async (msg: { type: string }) => {
 				if (msg.type === 'getSettings') return { allowTabCreation: true, allowTabClosing: false };
@@ -636,6 +676,25 @@ describe('useConnection', () => {
 
 			expect(result().status.value).toBe('disconnected');
 			expect(result().controlledTabs.value).toEqual([]);
+
+			wrapper.unmount();
+		});
+
+		it('strips the stale connection params from the page URL', async () => {
+			window.history.replaceState(
+				{},
+				'',
+				'/?mcpRelayUrl=' + encodeURIComponent('ws://localhost:1111') + '&autoConnect=1',
+			);
+
+			const { wrapper, result } = mountComposable();
+			await flush();
+
+			pushMessage({ type: 'relayUrlReady', relayUrl: 'ws://localhost:9999' });
+			await flush();
+
+			expect(result().relayUrl.value).toBe('ws://localhost:9999');
+			expect(window.location.search).toBe('');
 
 			wrapper.unmount();
 		});

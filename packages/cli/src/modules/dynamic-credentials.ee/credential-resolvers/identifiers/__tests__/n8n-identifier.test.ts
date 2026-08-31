@@ -1,26 +1,35 @@
+import type { Mocked } from 'vitest';
 import type { User } from '@n8n/db';
 import { CredentialResolverError } from '@n8n/decorators';
-import { mock } from 'jest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 
 import type { AuthService } from '@/auth/auth.service';
 import { AuthError } from '@/errors/response-errors/auth.error';
+import type { OAuthTokenVerifierProxy } from '@/services/oauth-token-verifier-proxy.service';
 
-import { N8NIdentifier } from '../n8n-identifier';
+import {
+	carriesN8nIdentity,
+	N8N_IDENTITY_SOURCES,
+	N8NIdentifierMetadataSchema,
+	N8NIdentifier,
+} from '../n8n-identifier';
 
 describe('N8NIdentifier', () => {
 	let identifier: N8NIdentifier;
-	let mockAuthService: jest.Mocked<AuthService>;
+	let mockAuthService: Mocked<AuthService>;
+	let mockOAuthVerifier: Mocked<OAuthTokenVerifierProxy>;
 
 	const mockUser = mock<User>({ id: 'user-123' });
 
 	beforeEach(() => {
 		mockAuthService = mock<AuthService>();
+		mockOAuthVerifier = mock<OAuthTokenVerifierProxy>();
 
-		identifier = new N8NIdentifier(mockAuthService);
+		identifier = new N8NIdentifier(mockAuthService, mockOAuthVerifier);
 	});
 
 	afterEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe('validateOptions', () => {
@@ -315,5 +324,124 @@ describe('N8NIdentifier', () => {
 				await expect(identifier.resolve(context, {})).rejects.toThrow('Database connection failed');
 			});
 		});
+
+		describe('n8n-oauth branch', () => {
+			it('should verify the token for the resource audience and resolve the user', async () => {
+				mockOAuthVerifier.verifyOAuthAccessToken.mockResolvedValue({ user: mockUser });
+
+				const context = {
+					identity: 'oauth-access-token',
+					version: 1 as const,
+					metadata: {
+						source: 'n8n-oauth' as const,
+						resource: 'https://host/mcp/workflow-a',
+					},
+				};
+
+				const result = await identifier.resolve(context, {});
+
+				expect(result).toBe('user-123');
+				expect(mockOAuthVerifier.verifyOAuthAccessToken).toHaveBeenCalledWith(
+					'oauth-access-token',
+					'https://host/mcp/workflow-a',
+					undefined,
+				);
+				expect(mockAuthService.authenticateUserByCookie).not.toHaveBeenCalled();
+				expect(mockAuthService.authenticateUserBasedOnToken).not.toHaveBeenCalled();
+			});
+
+			it('should pass the sealed grant through, for a run that outlived its trigger', async () => {
+				mockOAuthVerifier.verifyOAuthAccessToken.mockResolvedValue({ user: mockUser });
+
+				const grant = {
+					audiences: ['https://host/mcp/workflow-a'],
+					executeAccessWorkflowId: 'workflow-a',
+				};
+
+				const result = await identifier.resolve(
+					{
+						identity: 'oauth-access-token',
+						version: 1 as const,
+						metadata: {
+							source: 'n8n-oauth' as const,
+							resource: 'https://host/mcp/workflow-a',
+							grant,
+						},
+					},
+					{},
+				);
+
+				expect(result).toBe('user-123');
+				expect(mockOAuthVerifier.verifyOAuthAccessToken).toHaveBeenCalledWith(
+					'oauth-access-token',
+					'https://host/mcp/workflow-a',
+					grant,
+				);
+			});
+
+			it('should reject a grant that names no audience', async () => {
+				await expect(
+					identifier.resolve(
+						{
+							identity: 'oauth-access-token',
+							version: 1 as const,
+							metadata: {
+								source: 'n8n-oauth' as const,
+								resource: 'https://host/mcp/workflow-a',
+								grant: { audiences: [] },
+							},
+						},
+						{},
+					),
+				).rejects.toThrow(CredentialResolverError);
+				expect(mockOAuthVerifier.verifyOAuthAccessToken).not.toHaveBeenCalled();
+			});
+
+			it('should throw CredentialResolverError when the token resolves to no user', async () => {
+				mockOAuthVerifier.verifyOAuthAccessToken.mockResolvedValue({
+					user: null,
+					context: { reason: 'invalid_token', auth_type: 'oauth' },
+				});
+
+				const context = {
+					identity: 'wrong-audience-token',
+					version: 1 as const,
+					metadata: {
+						source: 'n8n-oauth' as const,
+						resource: 'https://host/mcp/workflow-b',
+					},
+				};
+
+				await expect(identifier.resolve(context, {})).rejects.toThrow(CredentialResolverError);
+			});
+		});
+	});
+});
+
+describe('carriesN8nIdentity', () => {
+	it.each(N8N_IDENTITY_SOURCES)('recognises the %s source', (source) => {
+		expect(carriesN8nIdentity({ identity: 'token', version: 1, metadata: { source } })).toBe(true);
+	});
+
+	it('recognises an n8n source even when the rest of the metadata is missing', () => {
+		// Fail-safe: an incomplete `cookie-source` context still carries an n8n token, and
+		// must not be waved through to a resolver that would treat it as an external one.
+		expect(
+			carriesN8nIdentity({ identity: 'token', version: 1, metadata: { source: 'cookie-source' } }),
+		).toBe(true);
+	});
+
+	it.each([
+		['slack-signature', { source: 'slack-signature' }],
+		['http-header', { source: 'http-header', headerName: 'authorization' }],
+		['no source at all', {}],
+	])('does not claim %s', (_label, metadata) => {
+		expect(carriesN8nIdentity({ identity: 'token', version: 1, metadata })).toBe(false);
+	});
+
+	it('covers every source the identifier accepts', () => {
+		// Guards against a source being added to the schema but not to the list, which
+		// would silently hand an n8n token to an external-subject resolver.
+		expect(N8NIdentifierMetadataSchema.options).toHaveLength(3);
 	});
 });

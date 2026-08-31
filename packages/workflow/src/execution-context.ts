@@ -60,6 +60,21 @@ export const SecureArtifactsSchema = z
  */
 export type ISecureArtifacts = z.output<typeof SecureArtifactsSchema>;
 
+/**
+ * What a run needs to keep verifying its token once the OAuth protected resource it was
+ * granted access to can no longer be looked up. Resource descriptors are derived from
+ * what routes the request, which stops existing when the trigger stops listening; a run
+ * outlives that, so it carries the facts with it.
+ *
+ * Holds no authorization *decision* — only its inputs, so every check stays live.
+ */
+export interface OAuthResourceGrant {
+	/** `aud` values a token issued for this resource may carry. */
+	audiences: string[];
+	/** Workflow the holder must keep `workflow:execute` on. Absent if none is required. */
+	executeAccessWorkflowId?: string;
+}
+
 const CredentialContextSchemaV1 = z.object({
 	version: z.literal(1),
 	/**
@@ -120,16 +135,26 @@ const RedactionSettingSchemaV1 = z.object({
 
 export type IRedactionSettingV1 = z.output<typeof RedactionSettingSchemaV1>;
 
+const RedactionSourceSchema = z.union([z.literal('workflow'), z.literal('instance')]);
+
+export type RedactionSource = z.output<typeof RedactionSourceSchema>;
+
 /**
  * Per-channel redaction snapshot. Each channel records, independently, whether
  * execution data is redacted for production and manual executions. This is the
  * strictest-per-channel resolution of the workflow setting and the instance floor,
  * captured at execution time.
+ *
+ * `source` records which layer raised the bar:
+ * - `'instance'` when the floor enforced redaction the workflow did not ask for.
+ * - `'workflow'` otherwise (workflow setting met or exceeded the floor, including
+ *   the floor='off' case).
  */
 const RedactionSettingSchemaV2 = z.object({
 	version: z.literal(2),
 	production: z.boolean(),
 	manual: z.boolean(),
+	source: RedactionSourceSchema.optional(),
 });
 
 export type IRedactionSettingV2 = z.output<typeof RedactionSettingSchemaV2>;

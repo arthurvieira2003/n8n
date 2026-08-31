@@ -130,8 +130,228 @@ describe('nodes tool', () => {
 				{} as never,
 			);
 
-			expect(context.nodeService.listAvailable).toHaveBeenCalledWith({ query: 'http' });
+			expect(context.nodeService.listAvailable).toHaveBeenCalledWith({
+				query: 'http',
+				n8nConnectOnly: undefined,
+			});
 			expect(result).toEqual({ nodes });
+		});
+
+		it('should forward n8nConnectOnly to nodeService.listAvailable', async () => {
+			const nodes = [
+				{
+					name: 'n8n-nodes-base.openAi',
+					displayName: 'OpenAI',
+					description: 'Use OpenAI',
+					group: ['transform'],
+					version: 1,
+					aiGateway: { supported: true },
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listAvailable as Mock).mockResolvedValue(nodes);
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(
+				tool,
+				{ action: 'list', n8nConnectOnly: true } as never,
+				{} as never,
+			);
+
+			expect(context.nodeService.listAvailable).toHaveBeenCalledWith({
+				query: undefined,
+				n8nConnectOnly: true,
+			});
+			expect(result).toEqual({ nodes });
+		});
+	});
+
+	describe('search action', () => {
+		it('should search nodes by query and reuse the searchable node list reference', async () => {
+			const searchableNodes = [
+				{
+					name: 'n8n-nodes-base.httpRequest',
+					displayName: 'HTTP Request',
+					description: 'Make HTTP requests',
+					inputs: ['main'],
+					outputs: ['main'],
+					version: 1,
+					codex: { alias: ['api'] },
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue(searchableNodes);
+
+			const tool = createNodesTool(context, 'full');
+			const first = await executeTool(
+				tool,
+				{ action: 'search', query: 'http', limit: 5 } as never,
+				{} as never,
+			);
+			const second = await executeTool(
+				tool,
+				{ action: 'search', query: 'http', limit: 5 } as never,
+				{} as never,
+			);
+
+			expect(context.nodeService.listSearchable).toHaveBeenCalledTimes(2);
+			expect(first).toMatchObject({
+				totalResults: 1,
+				results: [expect.objectContaining({ name: 'n8n-nodes-base.httpRequest' })],
+			});
+			expect(second).toMatchObject({
+				totalResults: 1,
+				results: [expect.objectContaining({ name: 'n8n-nodes-base.httpRequest' })],
+			});
+		});
+
+		it('should search nodes by connection type and enrich results with discriminators', async () => {
+			const searchableNodes = [
+				{
+					name: 'n8n-nodes-base.slackTool',
+					displayName: 'Slack Tool',
+					description: 'Send messages to Slack from an AI agent',
+					inputs: ['main'],
+					outputs: ['ai_tool'],
+					version: 1,
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue(searchableNodes);
+			context.nodeService.listDiscriminators = vi.fn().mockResolvedValue({
+				resource: ['message'],
+			});
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(
+				tool,
+				{ action: 'search', connectionType: 'ai_tool', limit: 5 } as never,
+				{} as never,
+			);
+
+			expect(context.nodeService.listDiscriminators).toHaveBeenCalledWith(
+				'n8n-nodes-base.slackTool',
+			);
+			expect(result).toMatchObject({
+				totalResults: 1,
+				results: [
+					expect.objectContaining({
+						name: 'n8n-nodes-base.slackTool',
+						discriminators: { resource: ['message'] },
+					}),
+				],
+			});
+		});
+
+		it('surfaces aiGateway meta from searchable nodes through the search handler', async () => {
+			const searchableNodes = [
+				{
+					name: 'n8n-nodes-base.firecrawl',
+					displayName: 'Firecrawl',
+					description: 'Scrape and crawl the web',
+					inputs: ['main'],
+					outputs: ['main'],
+					version: 1,
+					aiGateway: { supported: true, minVersion: 1 },
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue(searchableNodes);
+			context.nodeService.listDiscriminators = vi.fn().mockResolvedValue(null);
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(
+				tool,
+				{ action: 'search', query: 'firecrawl', limit: 5 } as never,
+				{} as never,
+			);
+
+			expect(result).toMatchObject({
+				results: [
+					expect.objectContaining({
+						name: 'n8n-nodes-base.firecrawl',
+						aiGateway: { supported: true, minVersion: 1 },
+					}),
+				],
+			});
+		});
+
+		it("suggests the chat model for the user's configured provider on ai_languageModel requirements", async () => {
+			const searchableNodes = [
+				{
+					name: '@n8n/n8n-nodes-langchain.agent',
+					displayName: 'AI Agent',
+					description: 'Reasoning agent',
+					inputs: ['main'],
+					outputs: ['main'],
+					version: 1,
+					builderHint: { inputs: { ai_languageModel: { required: true } } },
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue(searchableNodes);
+			(context.credentialService.list as Mock).mockResolvedValue([
+				{ id: 'cred-1', name: 'My Anthropic key', type: 'anthropicApi' },
+			]);
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(
+				tool,
+				{ action: 'search', query: 'agent', limit: 5 } as never,
+				{} as never,
+			);
+
+			expect(result).toMatchObject({
+				results: [
+					expect.objectContaining({
+						subnodeRequirements: [
+							expect.objectContaining({
+								connectionType: 'ai_languageModel',
+								suggestedNode: '@n8n/n8n-nodes-langchain.lmChatAnthropic',
+							}),
+						],
+					}),
+				],
+			});
+		});
+
+		it('does not suggest a chat model when no LLM credential is configured', async () => {
+			const searchableNodes = [
+				{
+					name: '@n8n/n8n-nodes-langchain.agent',
+					displayName: 'AI Agent',
+					description: 'Reasoning agent',
+					inputs: ['main'],
+					outputs: ['main'],
+					version: 1,
+					builderHint: { inputs: { ai_languageModel: { required: true } } },
+				},
+			];
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue(searchableNodes);
+			(context.credentialService.list as Mock).mockResolvedValue([]);
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(
+				tool,
+				{ action: 'search', query: 'agent', limit: 5 } as never,
+				{} as never,
+			);
+
+			const [node] = (result as { results: Array<{ subnodeRequirements?: unknown[] }> }).results;
+			expect(node.subnodeRequirements).toEqual([
+				expect.not.objectContaining({ suggestedNode: expect.anything() }),
+			]);
+		});
+
+		it('should return no search results when neither query nor connection type is provided', async () => {
+			const context = createMockContext();
+			(context.nodeService.listSearchable as Mock).mockResolvedValue([]);
+
+			const tool = createNodesTool(context, 'full');
+			const result = await executeTool(tool, { action: 'search' } as never, {} as never);
+
+			expect(result).toEqual({ results: [], totalResults: 0 });
 		});
 	});
 

@@ -8,3 +8,7 @@ Conflict:
   $ref: './conflict.yml'
 Forbidden:
   $ref: './forbidden.yml'
+PaymentRequired:
+  $ref: './paymentRequired.yml'
+UnsupportedMediaType:
+  $ref: './unsupportedMediaType.yml'

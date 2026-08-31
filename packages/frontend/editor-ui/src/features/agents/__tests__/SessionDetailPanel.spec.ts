@@ -8,14 +8,19 @@ import type { TimelineItem } from '../session-timeline.types';
 vi.mock('../components/WorkflowExecutionLogViewer.vue', () => ({
 	default: { template: '<div data-test-id="wf-log-viewer"></div>' },
 }));
-vi.mock('../components/RichInteractionCard.vue', () => ({
-	default: { template: '<div data-test-id="rich-card"></div>' },
-}));
 vi.mock('../components/ToolIoView.vue', () => ({
-	default: { template: '<div data-test-id="tool-io-view"></div>' },
+	default: {
+		name: 'ToolIoView',
+		props: ['input', 'nodeParameters'],
+		template: '<div data-test-id="tool-io-view"></div>',
+	},
 }));
 vi.mock('vue-markdown-render', () => ({
 	default: { template: '<div data-test-id="markdown"><slot /></div>' },
+}));
+// Reads useRootStore for download URLs — irrelevant to panel behavior.
+vi.mock('../components/AgentChatMessageAttachments.vue', () => ({
+	default: { template: '<div data-test-id="user-attachments"></div>' },
 }));
 
 function makeRouter(): Router {
@@ -31,12 +36,93 @@ function makeRouter(): Router {
 	});
 }
 
-function mountIt(item: TimelineItem | null) {
+function mountIt(
+	item: TimelineItem | null,
+	extraProps: { projectId?: string; agentId?: string } = {},
+) {
 	return mount(SessionDetailPanel, {
-		props: { item },
+		props: { item, ...extraProps },
 		global: { plugins: [makeRouter()] },
 	});
 }
+
+describe('SessionDetailPanel — user attachments', () => {
+	const userItem: TimelineItem = {
+		kind: 'user',
+		executionId: 'e1',
+		timestamp: 0,
+		content: 'look at this',
+		attachments: [{ id: 'att-1', fileName: 'photo.png', mimeType: 'image/png', sizeBytes: 33 }],
+	};
+
+	it('renders the attachments block for a user item with files', () => {
+		const w = mountIt(userItem, { projectId: 'p1', agentId: 'a1' });
+		expect(w.find('[data-test-id="user-attachments"]').exists()).toBe(true);
+	});
+
+	it('skips the attachments block without the project/agent scope for download URLs', () => {
+		const w = mountIt(userItem);
+		expect(w.find('[data-test-id="user-attachments"]').exists()).toBe(false);
+	});
+
+	it('skips the attachments block for user items without files', () => {
+		const w = mountIt({ ...userItem, attachments: undefined }, { projectId: 'p1', agentId: 'a1' });
+		expect(w.find('[data-test-id="user-attachments"]').exists()).toBe(false);
+	});
+});
+
+describe('SessionDetailPanel — integration action cards', () => {
+	const cardInput = {
+		action: 'respond',
+		input: {
+			message: {
+				card: {
+					title: 'Renewal Risk',
+					components: [{ type: 'button', label: 'Approve', value: 'approve' }],
+				},
+			},
+		},
+	};
+
+	it('renders the interaction card for any <platform>_action tool call', () => {
+		const w = mountIt({
+			kind: 'tool',
+			executionId: 'e1',
+			timestamp: 0,
+			toolName: 'slack_action',
+			toolInput: cardInput,
+			toolOutput: { type: 'button', value: 'approve' },
+		});
+		expect(w.text()).toContain('Renewal Risk');
+		expect(w.text()).toContain('Approve');
+	});
+
+	it('renders the interaction card for chat_action with JSON-string input', () => {
+		const w = mountIt({
+			kind: 'tool',
+			executionId: 'e1',
+			timestamp: 0,
+			toolName: 'chat_action',
+			toolInput: JSON.stringify(cardInput),
+			toolOutput: { ok: true },
+		});
+		expect(w.text()).toContain('Renewal Risk');
+	});
+
+	it('falls back to JSON for tool calls without a card', () => {
+		const w = mountIt({
+			kind: 'tool',
+			executionId: 'e1',
+			timestamp: 0,
+			toolName: 'slack_action',
+			toolInput: { action: 'add_reaction', input: { emoji: 'tada' } },
+			toolOutput: { ok: true },
+		});
+		expect(w.text()).not.toContain('Renewal Risk');
+		// Raw JSON view is shown instead of a card.
+		expect(w.text()).toContain('"add_reaction"');
+	});
+});
 
 describe('SessionDetailPanel — workflow branches', () => {
 	it('renders the WorkflowExecutionLogViewer when workflowExecutionId is set', () => {
@@ -113,19 +199,74 @@ describe('SessionDetailPanel — workflow branches', () => {
 	});
 });
 
-describe('SessionDetailPanel — other kinds', () => {
-	it('renders the rich-interaction card for rich_interaction tool calls', () => {
+describe('SessionDetailPanel — HITL sequence', () => {
+	it('keeps the original node call focused on its input and configuration', () => {
+		const toolInput = { query: 'open entries' };
+		const nodeParameters = { operation: 'get', returnAll: true };
 		const w = mountIt({
-			kind: 'tool',
+			kind: 'node',
 			executionId: 'e1',
 			timestamp: 0,
-			toolName: 'rich_interaction',
-			toolInput: { widget: 'x' },
-			toolOutput: { ok: true },
+			toolName: 'check_ledger',
+			toolInput,
+			toolOutcome: undefined,
+			nodeType: 'n8n-nodes-base.dataTableTool',
+			nodeTypeVersion: 1.1,
+			nodeDisplayName: 'Check ledger',
+			nodeParameters,
 		});
-		expect(w.find('[data-test-id="rich-card"]').exists()).toBe(true);
+
+		const toolIoView = w.getComponent({ name: 'ToolIoView' });
+		expect(toolIoView.props('input')).toEqual(toolInput);
+		expect(toolIoView.props('nodeParameters')).toEqual(nodeParameters);
+		expect(w.find('[data-test-id="detail-hitl-response-badge"]').exists()).toBe(false);
 	});
 
+	it('shows the linked tool and full request details on the HITL request', () => {
+		const w = mountIt({
+			kind: 'suspension',
+			executionId: 'e1',
+			timestamp: 100,
+			toolName: 'check_ledger',
+			hitlRequestType: 'approval',
+			hitlToolDisplayName: 'Check ledger',
+			hitlRequest: {
+				type: 'approval',
+				toolName: 'check_ledger',
+				args: { returnAll: true },
+			},
+		});
+
+		expect(w.text()).toContain('Approval request for Check ledger');
+		expect(w.text()).toContain('Check ledger');
+		expect(w.get('[data-test-id="hitl-request-details"]').text()).toContain('returnAll');
+	});
+
+	it.each([
+		['approved', 'Approved'],
+		['declined', 'Declined'],
+		['responded', 'Response received'],
+	] as const)('shows a %s status and response on the HITL response', (status, label) => {
+		const w = mountIt({
+			kind: 'hitl-response',
+			executionId: 'e2',
+			timestamp: 200,
+			toolName: 'check_ledger',
+			hitlRequestType: status === 'responded' ? 'interaction' : 'approval',
+			hitlResponseStatus: status,
+			hitlResponse: { value: status },
+		});
+
+		expect(w.get('[data-test-id="detail-hitl-response-badge"]').text()).toBe(label);
+		expect(w.text()).toContain(
+			status === 'responded' ? 'User response' : 'Approval response for Check ledger',
+		);
+		expect(w.get('[data-test-id="hitl-response-details"]').text()).toContain(status);
+		expect(w.find('[data-test-id="node-error-callout"]').exists()).toBe(false);
+	});
+});
+
+describe('SessionDetailPanel — other kinds', () => {
 	it('renders Input/Output JSON sections for generic tool calls', () => {
 		const w = mountIt({
 			kind: 'tool',
@@ -167,13 +308,14 @@ describe('SessionDetailPanel — other kinds', () => {
 			nodeDisplayName: 'Telegram',
 			toolInput: { chatId: '1' },
 			toolOutput: { error: 'Node does not have any credentials set' },
-			toolSuccess: false,
+			toolOutcome: 'error',
 		});
 		const callout = w.find('[data-test-id="node-error-callout"]');
 		expect(callout.exists()).toBe(true);
 		expect(callout.text()).toContain(
 			'Tool experienced an error: Node does not have any credentials set',
 		);
+		expect(w.get('[data-test-id="detail-tool-error-badge"]').text()).toBe('Error');
 	});
 
 	it('falls back to the prefix-only message when the failed node output has no error string', () => {
@@ -206,14 +348,45 @@ describe('SessionDetailPanel — other kinds', () => {
 			nodeDisplayName: 'HTTP Request',
 			toolInput: { url: 'https://x' },
 			toolOutput: { status: 200 },
-			toolSuccess: true,
+			toolOutcome: 'success',
 		});
 		expect(w.find('[data-test-id="node-error-callout"]').exists()).toBe(false);
+		expect(w.find('[data-test-id="detail-tool-error-badge"]').exists()).toBe(false);
 	});
 
 	it('renders markdown for user messages', () => {
 		const w = mountIt({ kind: 'user', executionId: 'e1', timestamp: 0, content: 'hi' });
 		expect(w.find('[data-test-id="markdown"]').exists()).toBe(true);
+	});
+
+	it('renders plain-text agent messages as markdown', () => {
+		const w = mountIt({ kind: 'agent', executionId: 'e1', timestamp: 0, content: 'Hello there' });
+		expect(w.find('[data-test-id="markdown"]').exists()).toBe(true);
+		expect(w.find('pre').exists()).toBe(false);
+	});
+
+	it('pretty-prints an agent message whose content is structured JSON output', () => {
+		const w = mountIt({
+			kind: 'agent',
+			executionId: 'e1',
+			timestamp: 0,
+			content: '{"city":"Tokyo","country":"Japan","population_millions":14.04}',
+		});
+		// JSON output is rendered in a <pre>, not via markdown.
+		expect(w.find('[data-test-id="markdown"]').exists()).toBe(false);
+		const pre = w.find('pre');
+		expect(pre.exists()).toBe(true);
+		expect(pre.text()).toContain('city');
+		expect(pre.text()).toContain('Tokyo');
+		expect(pre.text()).toContain('population_millions');
+		// Pretty-printed across multiple lines rather than a single raw string.
+		expect(pre.text().split('\n').length).toBeGreaterThan(1);
+	});
+
+	it('keeps markdown for an agent message that is valid JSON but not an object', () => {
+		const w = mountIt({ kind: 'agent', executionId: 'e1', timestamp: 0, content: '42' });
+		expect(w.find('[data-test-id="markdown"]').exists()).toBe(true);
+		expect(w.find('pre').exists()).toBe(false);
 	});
 
 	it('emits close when the close button is clicked', async () => {

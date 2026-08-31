@@ -1,9 +1,10 @@
 /* eslint-disable import-x/order */
+import type * as SharedSandboxMod from '@n8n/agents/sandbox';
 import type { Mock } from 'vitest';
 
 // The Daytona SDK is consumed in source via `loadDaytona()` (which `require()`s
-// @daytonaio/sdk — a path the test runner can't resolve in this monorepo), so we
-// mock the first-party `lazy-daytona` module. The mock classes live in vi.hoisted
+// @daytona/sdk — a path the test runner can't resolve in this monorepo), so we
+// mock the shared sandbox module. The mock classes live in vi.hoisted
 // so they are shared between the mock factory and the test (`instanceof` checks in
 // source must see the same DaytonaError the test constructs).
 const { DaytonaError, DaytonaNotFoundError, Image } = vi.hoisted(() => {
@@ -44,9 +45,20 @@ const { DaytonaError, DaytonaNotFoundError, Image } = vi.hoisted(() => {
 	return { DaytonaError, DaytonaNotFoundError, Image };
 });
 
-vi.mock('../lazy-daytona', () => ({
+vi.mock('@n8n/agents/sandbox', async (importOriginal) => ({
+	...(await importOriginal<typeof SharedSandboxMod>()),
 	loadDaytona: () => ({ DaytonaError, DaytonaNotFoundError, Image }),
 }));
+
+vi.mock('../builder-templates-service', () => {
+	class MockBuilderTemplatesService {
+		getBundle = vi.fn().mockResolvedValue({ archive: null, version: null });
+	}
+	return {
+		BuilderTemplatesService: MockBuilderTemplatesService,
+		builderTemplatesOptionsFromEnv: vi.fn().mockReturnValue({}),
+	};
+});
 
 import {
 	RUNTIME_SKILL_REGISTRY_SCHEMA_VERSION,
@@ -59,7 +71,7 @@ import { join } from 'node:path';
 import type { Logger } from '../../logger';
 import { SnapshotManager } from '../snapshot-manager';
 
-const SNAPSHOT_NAME_PATTERN = /^n8n\/instance-ai:1\.123\.0-[a-f0-9]{12}-[a-f0-9]{12}$/;
+const SNAPSHOT_NAME = 'n8n/instance-ai:1.123.0';
 const SKILLS_HASH_A = 'aaaaaaaaaaaa';
 const SKILLS_HASH_B = 'bbbbbbbbbbbb';
 
@@ -76,7 +88,7 @@ interface CreateSnapshotParams {
 }
 
 interface FakeSnapshotApi {
-	get: Mock<(...args: [string]) => Promise<{ name: string }>>;
+	get: Mock<(...args: [string]) => Promise<{ name: string; state: string; errorReason?: string }>>;
 	create: Mock<(...args: [CreateSnapshotParams, unknown?]) => Promise<{ name: string }>>;
 }
 
@@ -123,17 +135,12 @@ function createRuntimeSkillSource(skillsHash: string): RuntimeSkillSource {
 function makeFakeDaytona(): FakeDaytona {
 	return {
 		snapshot: {
-			get: vi.fn<(...args: [string]) => Promise<{ name: string }>>(),
+			get: vi
+				.fn<(...args: [string]) => Promise<{ name: string; state: string; errorReason?: string }>>()
+				.mockResolvedValue({ name: SNAPSHOT_NAME, state: 'active' }),
 			create: vi.fn<(...args: [CreateSnapshotParams, unknown?]) => Promise<{ name: string }>>(),
 		},
 	};
-}
-
-async function knowledgeBaseHash(): Promise<string> {
-	const { buildKnowledgeBaseWorkspaceBundle } = await import(
-		'../../knowledge-base/materialize-knowledge-base'
-	);
-	return buildKnowledgeBaseWorkspaceBundle({ root: '/home/daytona/workspace' }).contentHash;
 }
 
 describe('SnapshotManager.ensureImage', () => {
@@ -152,6 +159,7 @@ describe('SnapshotManager.ensureImage', () => {
 
 		const stagingDir = image.contextList[0]?.sourcePath;
 		expect(stagingDir).toBeDefined();
+		expect(stagingDir).toContain('n8n-snapshot-context-1.123.0');
 		await expect(
 			readFile(join(stagingDir, 'skills/data-table-manager/SKILL.md'), 'utf-8'),
 		).resolves.toContain('data-table');
@@ -178,37 +186,43 @@ describe('SnapshotManager.ensureImage', () => {
 		).resolves.toBeDefined();
 	});
 
-	it('changes the snapshot suffix when the runtime skills hash changes', async () => {
+	it('uses a content-hash cache key when no n8n version is configured', async () => {
+		const manager = new SnapshotManager(undefined, NOOP_LOGGER, undefined);
+
+		const image = await manager.ensureImage();
+		const stagingDir = image.contextList[0]?.sourcePath;
+
+		expect(stagingDir).toBeDefined();
+		expect(stagingDir).not.toContain('n8n-snapshot-context-temp-');
+		expect(stagingDir).toMatch(/n8n-snapshot-context-.+-/);
+	});
+
+	it('uses the same snapshot name regardless of runtime skills hash', async () => {
 		const daytonaA = makeFakeDaytona();
 		const daytonaB = makeFakeDaytona();
-		daytonaA.snapshot.create.mockResolvedValue({ name: 'ignored-a' });
-		daytonaB.snapshot.create.mockResolvedValue({ name: 'ignored-b' });
+		daytonaA.snapshot.create.mockResolvedValue({ name: SNAPSHOT_NAME });
+		daytonaB.snapshot.create.mockResolvedValue({ name: SNAPSHOT_NAME });
 		const managerA = new SnapshotManager(
 			undefined,
 			NOOP_LOGGER,
 			'1.123.0',
-			undefined,
 			createRuntimeSkillSource(SKILLS_HASH_A),
 		);
 		const managerB = new SnapshotManager(
 			undefined,
 			NOOP_LOGGER,
 			'1.123.0',
-			undefined,
 			createRuntimeSkillSource(SKILLS_HASH_B),
 		);
 
 		const snapshotA = await managerA.createSnapshot(daytonaA as never);
 		const snapshotB = await managerB.createSnapshot(daytonaB as never);
 
-		expect(snapshotA).toMatch(SNAPSHOT_NAME_PATTERN);
-		expect(snapshotB).toMatch(SNAPSHOT_NAME_PATTERN);
-		expect(snapshotA).toBe(`n8n/instance-ai:1.123.0-${SKILLS_HASH_A}-${await knowledgeBaseHash()}`);
-		expect(snapshotB).toBe(`n8n/instance-ai:1.123.0-${SKILLS_HASH_B}-${await knowledgeBaseHash()}`);
-		expect(snapshotA).not.toBe(snapshotB);
+		expect(snapshotA).toBe(SNAPSHOT_NAME);
+		expect(snapshotB).toBe(SNAPSHOT_NAME);
 	});
 
-	it('keeps the snapshot suffix stable when the base image changes', async () => {
+	it('keeps the snapshot name stable when the base image changes', async () => {
 		const daytonaA = makeFakeDaytona();
 		const daytonaB = makeFakeDaytona();
 		daytonaA.snapshot.create.mockResolvedValue({ name: 'ignored-a' });
@@ -217,22 +231,20 @@ describe('SnapshotManager.ensureImage', () => {
 			'daytonaio/sandbox:0.5.0',
 			NOOP_LOGGER,
 			'1.123.0',
-			undefined,
 			createRuntimeSkillSource(SKILLS_HASH_A),
 		);
 		const managerB = new SnapshotManager(
 			'node:24',
 			NOOP_LOGGER,
 			'1.123.0',
-			undefined,
 			createRuntimeSkillSource(SKILLS_HASH_A),
 		);
 
 		const snapshotA = await managerA.createSnapshot(daytonaA as never);
 		const snapshotB = await managerB.createSnapshot(daytonaB as never);
 
-		expect(snapshotA).toBe(`n8n/instance-ai:1.123.0-${SKILLS_HASH_A}-${await knowledgeBaseHash()}`);
-		expect(snapshotB).toBe(snapshotA);
+		expect(snapshotA).toBe(SNAPSHOT_NAME);
+		expect(snapshotB).toBe(SNAPSHOT_NAME);
 		expect(daytonaA.snapshot.create.mock.calls[0][0].image.dockerfile).toContain(
 			'FROM daytonaio/sandbox:0.5.0',
 		);
@@ -248,10 +260,11 @@ describe('SnapshotManager.createSnapshot', () => {
 
 		const result = await manager.createSnapshot(daytona as never);
 
-		expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
+		expect(result).toBe(SNAPSHOT_NAME);
 		expect(daytona.snapshot.create).toHaveBeenCalledTimes(1);
+		expect(daytona.snapshot.get).toHaveBeenCalledWith(SNAPSHOT_NAME);
 		const callArgs = daytona.snapshot.create.mock.calls[0][0];
-		expect(callArgs.name).toMatch(SNAPSHOT_NAME_PATTERN);
+		expect(callArgs.name).toBe(SNAPSHOT_NAME);
 		expect(callArgs.image).toBeDefined();
 	});
 
@@ -262,7 +275,7 @@ describe('SnapshotManager.createSnapshot', () => {
 
 		const result = await manager.createSnapshot(daytona as never);
 
-		expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
+		expect(result).toBe(SNAPSHOT_NAME);
 	});
 
 	it('treats messages mentioning "already exists" as success', async () => {
@@ -274,7 +287,44 @@ describe('SnapshotManager.createSnapshot', () => {
 
 		const result = await manager.createSnapshot(daytona as never);
 
-		expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
+		expect(result).toBe(SNAPSHOT_NAME);
+	});
+
+	it('throws when the created snapshot is in a failed state', async () => {
+		const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
+		const daytona = makeFakeDaytona();
+		daytona.snapshot.create.mockResolvedValue({ name: SNAPSHOT_NAME });
+		daytona.snapshot.get.mockResolvedValue({
+			name: SNAPSHOT_NAME,
+			state: 'build_failed',
+			errorReason: 'npm install exited 1',
+		});
+
+		await expect(manager.createSnapshot(daytona as never)).rejects.toThrow(
+			`Versioned Daytona snapshot "${SNAPSHOT_NAME}" exists but is unusable (state: build_failed, reason: npm install exited 1)`,
+		);
+	});
+
+	it('waits for an existing snapshot that is still building', async () => {
+		const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
+		const daytona = makeFakeDaytona();
+		daytona.snapshot.create.mockRejectedValue(new DaytonaError('already exists', 409));
+		daytona.snapshot.get
+			.mockResolvedValueOnce({ name: SNAPSHOT_NAME, state: 'building' })
+			.mockResolvedValue({ name: SNAPSHOT_NAME, state: 'active' });
+
+		// Warm the image cache before faking timers; staging does real fs work.
+		await manager.ensureImage();
+		vi.useFakeTimers();
+		try {
+			const promise = manager.createSnapshot(daytona as never);
+			await vi.runAllTimersAsync();
+
+			await expect(promise).resolves.toBe(SNAPSHOT_NAME);
+			expect(daytona.snapshot.get).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('throws on transient errors', async () => {
@@ -302,135 +352,21 @@ describe('SnapshotManager.createSnapshot', () => {
 		await manager.createSnapshot(daytona as never, { timeout: 1800, onLogs });
 
 		const [snapshotParams, options] = daytona.snapshot.create.mock.calls[0];
-		expect(snapshotParams.name).toMatch(SNAPSHOT_NAME_PATTERN);
+		expect(snapshotParams.name).toBe(SNAPSHOT_NAME);
 		expect(options).toMatchObject({ timeout: 1800, onLogs });
 	});
 });
 
-describe('SnapshotManager.ensureSnapshot', () => {
-	describe('when no version is provided', () => {
-		it('returns null without calling daytona', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, undefined);
-			const daytona = makeFakeDaytona();
+describe('SnapshotManager.snapshotName', () => {
+	it('returns null when no version is configured', () => {
+		const manager = new SnapshotManager(undefined, NOOP_LOGGER, undefined);
 
-			const result = await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(result).toBeNull();
-			expect(daytona.snapshot.get).not.toHaveBeenCalled();
-			expect(daytona.snapshot.create).not.toHaveBeenCalled();
-		});
-
-		it('returns null in proxy mode without calling daytona', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, undefined);
-			const daytona = makeFakeDaytona();
-
-			const result = await manager.ensureSnapshot(daytona as never, 'proxy');
-
-			expect(result).toBeNull();
-			expect(daytona.snapshot.get).not.toHaveBeenCalled();
-		});
+		expect(manager.snapshotName()).toBeNull();
 	});
 
-	describe('proxy mode', () => {
-		it('returns the snapshot name without calling daytona', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
-			const daytona = makeFakeDaytona();
+	it('returns the versioned snapshot name', () => {
+		const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
 
-			const result = await manager.ensureSnapshot(daytona as never, 'proxy');
-
-			expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
-			expect(daytona.snapshot.get).not.toHaveBeenCalled();
-			expect(daytona.snapshot.create).not.toHaveBeenCalled();
-		});
-	});
-
-	describe('direct mode', () => {
-		it('optimistically creates and returns the snapshot name', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create.mockResolvedValue({ name: 'n8n/instance-ai:1.123.0' });
-
-			const result = await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
-			expect(daytona.snapshot.create).toHaveBeenCalledTimes(1);
-			expect(daytona.snapshot.get).not.toHaveBeenCalled();
-		});
-
-		it('treats 409 conflict as success', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create.mockRejectedValue(new DaytonaError('already exists', 409));
-
-			const result = await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(result).toMatch(SNAPSHOT_NAME_PATTERN);
-		});
-
-		it('returns null and clears memoization on transient errors', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create
-				.mockRejectedValueOnce(new DaytonaError('upstream 500', 500))
-				.mockResolvedValueOnce({ name: 'n8n/instance-ai:1.123.0' });
-
-			const first = await manager.ensureSnapshot(daytona as never, 'direct');
-			const second = await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(first).toBeNull();
-			expect(second).toMatch(SNAPSHOT_NAME_PATTERN);
-			expect(daytona.snapshot.create).toHaveBeenCalledTimes(2);
-		});
-
-		it('memoizes a successful create — does not call create twice', async () => {
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0');
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create.mockResolvedValue({ name: 'n8n/instance-ai:1.123.0' });
-
-			await manager.ensureSnapshot(daytona as never, 'direct');
-			const second = await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(second).toMatch(SNAPSHOT_NAME_PATTERN);
-			expect(daytona.snapshot.create).toHaveBeenCalledTimes(1);
-		});
-
-		it('reports transient failures via the error reporter', async () => {
-			const errorReporter = { error: vi.fn() };
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0', errorReporter);
-			const daytona = makeFakeDaytona();
-			const error = new DaytonaError('upstream 500', 500);
-			daytona.snapshot.create.mockRejectedValue(error);
-
-			await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(errorReporter.error).toHaveBeenCalledWith(
-				error,
-				expect.objectContaining({
-					tags: expect.objectContaining({ component: 'snapshot-manager' }) as unknown,
-				}),
-			);
-		});
-
-		it('does not report when create succeeds', async () => {
-			const errorReporter = { error: vi.fn() };
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0', errorReporter);
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create.mockResolvedValue({ name: 'n8n/instance-ai:1.123.0' });
-
-			await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(errorReporter.error).not.toHaveBeenCalled();
-		});
-
-		it('does not report 409/already-exists as an error', async () => {
-			const errorReporter = { error: vi.fn() };
-			const manager = new SnapshotManager(undefined, NOOP_LOGGER, '1.123.0', errorReporter);
-			const daytona = makeFakeDaytona();
-			daytona.snapshot.create.mockRejectedValue(new DaytonaError('already exists', 409));
-
-			await manager.ensureSnapshot(daytona as never, 'direct');
-
-			expect(errorReporter.error).not.toHaveBeenCalled();
-		});
+		expect(manager.snapshotName()).toBe(SNAPSHOT_NAME);
 	});
 });
