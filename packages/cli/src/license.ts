@@ -317,15 +317,23 @@ export class License implements LicenseProvider {
 	}
 
 	isLicensed(feature: BooleanLicenseFeature) {
-		return this.manager?.hasFeatureEnabled(feature) ?? false;
+		// Personal fork: unlock all licensed features except those that restrict access.
+		if (
+			feature === LICENSE_FEATURES.API_DISABLED ||
+			feature === LICENSE_FEATURES.SHOW_NON_PROD_BANNER
+		) {
+			return false;
+		}
+
+		return true;
 	}
 
 	isCertValid(): boolean {
-		return this.manager?.isValid(false /* useLogger */) ?? false;
+		return true;
 	}
 
 	hasFeatureInCert(feature: BooleanLicenseFeature): boolean {
-		return this.manager?.hasFeatureEnabled(feature, false) ?? false;
+		return this.isLicensed(feature);
 	}
 
 	/** @deprecated Use `LicenseState.isDynamicCredentialsLicensed` instead. */
@@ -443,6 +451,14 @@ export class License implements LicenseProvider {
 	}
 
 	getValue<T extends keyof FeatureReturnType>(feature: T): FeatureReturnType[T] {
+		if (feature === 'planName') {
+			return 'Enterprise' as FeatureReturnType[T];
+		}
+
+		if (typeof feature === 'string' && feature.startsWith('quota:')) {
+			return UNLIMITED_LICENSE_QUOTA as FeatureReturnType[T];
+		}
+
 		return this.manager?.getFeatureValue(feature) as FeatureReturnType[T];
 	}
 
@@ -637,8 +653,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState` instead. */
 	isWithinUsersLimit() {
-		// oxlint-disable-next-line typescript/no-deprecated
-		return this.getUsersLimit() === UNLIMITED_LICENSE_QUOTA;
+		return true;
 	}
 
 	private onExpirySoon() {
