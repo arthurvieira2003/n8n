@@ -1,16 +1,17 @@
-x-n8n-image: &n8n-image ${N8N_IMAGE:-n8nio/n8n:2.39.2}
+x-n8n-image: &n8n-image ${N8N_IMAGE:-copapel/n8n:2.39.2-homolog}
 x-runners-image: &runners-image ${N8N_RUNNERS_IMAGE:-n8nio/runners:2.39.2}
 
 # ============ blocos reutilizados ============
 x-n8n-common-env: &n8n-common-env
-  N8N_PROTOCOL: https
-  N8N_HOST: ${N8N_HOST}
+  N8N_PROTOCOL: http
+  N8N_HOST: ${N8N_HOST:?N8N_HOST nao definida}
   N8N_PROXY_HOPS: '1'
+  N8N_SECURE_COOKIE: 'false'
   NODE_ENV: production
   NODE_FUNCTION_ALLOW_BUILTIN: zlib
   N8N_LICENSE_UNLOCK_ALL: 'true'
-  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-  WEBHOOK_URL: https://${N8N_HOST}/
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY nao definida}
+  WEBHOOK_URL: http://${N8N_HOST:?N8N_HOST nao definida}/
   GENERIC_TIMEZONE: America/Sao_Paulo
   TZ: America/Sao_Paulo
   N8N_RELEASE_TYPE: beta
@@ -18,9 +19,9 @@ x-n8n-common-env: &n8n-common-env
   DB_TYPE: postgresdb
   DB_POSTGRESDB_HOST: postgres
   DB_POSTGRESDB_PORT: '5432'
-  DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
-  DB_POSTGRESDB_USER: ${POSTGRES_USER}
-  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+  DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:?POSTGRES_DB nao definida}
+  DB_POSTGRESDB_USER: ${POSTGRES_USER:?POSTGRES_USER nao definida}
+  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD nao definida}
   # ---- dados de execução ----
   EXECUTIONS_DATA_SAVE_ON_SUCCESS: all # desligar por workflow nos pesados (Settings do workflow)
   EXECUTIONS_DATA_SAVE_ON_ERROR: all
@@ -48,7 +49,7 @@ x-n8n-worker-env: &n8n-worker-env
   NODE_OPTIONS: --max-old-space-size=1536 # heap do worker com teto
   DB_POSTGRESDB_POOL_SIZE: '5' # 1 conexão por job (default é 2)
   N8N_RUNNERS_MODE: external
-  N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+  N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:?N8N_RUNNERS_AUTH_TOKEN nao definida}
   N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
   N8N_RUNNERS_MAX_CONCURRENCY: '5'
   N8N_RUNNERS_TASK_TIMEOUT: '300'
@@ -57,7 +58,7 @@ x-n8n-worker-env: &n8n-worker-env
   N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: '300'
 
 x-runner-env: &runner-env
-  N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+  N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:?N8N_RUNNERS_AUTH_TOKEN nao definida}
   N8N_RUNNERS_MAX_CONCURRENCY: '5'
   N8N_RUNNERS_TASK_TIMEOUT: '300'
   N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: '300'
@@ -88,9 +89,9 @@ services:
     container_name: n8n-postgres
     restart: always
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB nao definida}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER nao definida}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD nao definida}
       TZ: America/Sao_Paulo
       PGTZ: America/Sao_Paulo
     volumes:
