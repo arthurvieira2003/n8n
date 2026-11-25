@@ -1,5 +1,5 @@
-x-n8n-image: &n8n-image ${N8N_IMAGE:-copapel/n8n:2.39.2-homolog}
-x-runners-image: &runners-image ${N8N_RUNNERS_IMAGE:-n8nio/runners:2.39.2}
+x-n8n-image: &n8n-image ${N8N_IMAGE:-copapel/n8n:3.4.0-homolog}
+x-runners-image: &runners-image ${N8N_RUNNERS_IMAGE:-n8nio/runners:3.4.0}
 
 # ============ blocos reutilizados ============
 x-n8n-common-env: &n8n-common-env
